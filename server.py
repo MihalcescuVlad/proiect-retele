@@ -5,6 +5,7 @@ import uuid
 
 HOST = "0.0.0.0"
 PORT = 5000
+BUFFER_SIZE = 4096
 
 clients = []
 keys = {}
@@ -20,12 +21,41 @@ def send_json(client_socket, message):
 
 def broadcast(message):
     with lock:
-        for client in clients:
-            try:
-                send_json(client, message)
-            except:
-                pass
+        current_clients = list(clients)
 
+    for client in current_clients:
+        try:
+            send_json(client, message)
+        except OSError:
+            pass
+
+
+def handle_message(client_socket, message):
+    message_type = message.get("type")
+
+    if message_type == "PUBLISH":
+        handle_publish(client_socket, message)
+
+    elif message_type == "GET":
+        handle_get(client_socket, message)
+
+    elif message_type == "OBJECT_DATA":
+        handle_object_data(client_socket, message)
+
+    elif message_type == "DELETE":
+        handle_delete(client_socket, message)
+
+    else:
+        send_json(client_socket, {
+            "type": "ERROR",
+            "message": "Tip de mesaj necunoscut."
+        })
+
+
+def format_log_message(message_text):
+    if len(message_text) <= 500:
+        return message_text
+    return message_text[:500] + "... [mesaj trunchiat in log]"
 
 def handle_publish(client_socket, message):
     key = message.get("key")
@@ -193,43 +223,35 @@ def handle_client(client_socket, address):
     })
 
     try:
+        buffer = ""
+
         while True:
-            data = client_socket.recv(4096)
+            data = client_socket.recv(BUFFER_SIZE)
 
             if not data:
                 break
 
-            message_text = data.decode("utf-8").strip()
-            print(f"[MESAJ de la {address}] {message_text}")
+            buffer += data.decode("utf-8")
 
-            try:
-                message = json.loads(message_text)
-            except json.JSONDecodeError:
-                send_json(client_socket, {
-                    "type": "ERROR",
-                    "message": "Mesaj JSON invalid."
-                })
-                continue
+            while "\n" in buffer:
+                message_text, buffer = buffer.split("\n", 1)
+                message_text = message_text.strip()
 
-            message_type = message.get("type")
+                if not message_text:
+                    continue
 
-            if message_type == "PUBLISH":
-                handle_publish(client_socket, message)
+                print(f"[MESAJ de la {address}] {format_log_message(message_text)}")
 
-            elif message_type == "GET":
-                handle_get(client_socket, message)
+                try:
+                    message = json.loads(message_text)
+                except json.JSONDecodeError:
+                    send_json(client_socket, {
+                        "type": "ERROR",
+                        "message": "Mesaj JSON invalid."
+                    })
+                    continue
 
-            elif message_type == "OBJECT_DATA":
-                handle_object_data(client_socket, message)
-
-            elif message_type == "DELETE":
-                handle_delete(client_socket, message)
-
-            else:
-                send_json(client_socket, {
-                    "type": "ERROR",
-                    "message": "Tip de mesaj necunoscut."
-                })
+                handle_message(client_socket, message)
 
     except ConnectionResetError:
         print(f"[DECONECTARE FORTATA] {address}")
@@ -247,6 +269,7 @@ def handle_client(client_socket, address):
 
 def start_server():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind((HOST, PORT))
     server_socket.listen()
 
